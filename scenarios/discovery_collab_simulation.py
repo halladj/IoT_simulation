@@ -574,7 +574,8 @@ class VisualizationManager:
         
         # You can also add rectangles directly in NetAnim by adding to the XML
         # For now, let's enable mobility updates for smoother animation
-        # self.anim.EnablePacketMetadata(True)
+        self.anim.SetMaxPktsPerTraceFile(500000)
+        self.anim.EnablePacketMetadata(True)
         # self.anim.EnableIpv4RouteTracking("routingtable-wireless.xml", 
         #                                    ns.Seconds(0), ns.Seconds(5), ns.Seconds(0.25))
         
