@@ -393,7 +393,7 @@ class CollaborationPhaseManager:
         """Create collaboration server on a node using TCP"""
         # Use PacketSink for TCP server
         local_address = ns.InetSocketAddress(ns.Ipv4Address.GetAny(), port)
-        server = ns.PacketSinkHelper("ns3::TcpSocketFactory", local_address)
+        server = ns.PacketSinkHelper("ns3::TcpSocketFactory", local_address.ConvertTo())
         
         server_app = server.Install(node)
         server_app.Start(ns.Seconds(self.config.collab_start))
@@ -479,8 +479,8 @@ class CollaborationPhaseManager:
                              start_time, source_name, target_name):
         """Create collaboration client connection using TCP"""
         # Use OnOffApplication for TCP client
-        client = ns.OnOffHelper("ns3::TcpSocketFactory",
-                               ns.InetSocketAddress(target_addr, target_port))
+        address = ns.InetSocketAddress(target_addr, target_port)
+        client = ns.OnOffHelper("ns3::TcpSocketFactory", address.ConvertTo())
         
         # Configure traffic: 8kbps constant
         client.SetAttribute("DataRate", ns.StringValue("8192bps"))
