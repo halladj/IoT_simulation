@@ -390,14 +390,17 @@ class CollaborationPhaseManager:
         print(f"{'='*70}\n")
 
     def _create_collab_server(self, node, port, address, name):
-        """Create collaboration server on a node"""
-        server = ns.UdpEchoServerHelper(port)
+        """Create collaboration server on a node using TCP"""
+        # Use PacketSink for TCP server
+        local_address = ns.InetSocketAddress(ns.Ipv4Address.GetAny(), port)
+        server = ns.PacketSinkHelper("ns3::TcpSocketFactory", local_address)
+        
         server_app = server.Install(node)
         server_app.Start(ns.Seconds(self.config.collab_start))
         server_app.Stop(ns.Seconds(self.config.collab_start +
                                    self.config.collab_duration))
         self.collab_servers.Add(server_app)
-        print(f"  {name}: Collaboration server at {address}:{port}")
+        print(f"  {name}: Collaboration TCP server at {address}:{port}")
 
     def _setup_collab_connections(self, fixed_interfaces, mobile_interfaces):
         """Setup peer-to-peer collaboration connections"""
@@ -474,21 +477,23 @@ class CollaborationPhaseManager:
 
     def _create_collab_client(self, node, target_addr, target_port,
                              start_time, source_name, target_name):
-        """Create collaboration client connection"""
-        # Convert Ipv4Address to InetSocketAddress
-        remote_address = ns.InetSocketAddress(target_addr, target_port)
-
-        client = ns.UdpEchoClientHelper(remote_address.ConvertTo())
-        client.SetAttribute("MaxPackets", ns.UintegerValue(10000))
-        client.SetAttribute("Interval", ns.TimeValue(ns.Seconds(1.0)))
+        """Create collaboration client connection using TCP"""
+        # Use OnOffApplication for TCP client
+        client = ns.OnOffHelper("ns3::TcpSocketFactory",
+                               ns.InetSocketAddress(target_addr, target_port))
+        
+        # Configure traffic: 8kbps constant
+        client.SetAttribute("DataRate", ns.StringValue("8192bps"))
         client.SetAttribute("PacketSize", ns.UintegerValue(1024))
+        client.SetAttribute("OnTime", ns.StringValue("ns3::ConstantRandomVariable[Constant=1]"))
+        client.SetAttribute("OffTime", ns.StringValue("ns3::ConstantRandomVariable[Constant=0]"))
 
         client_app = client.Install(node)
         client_app.Start(ns.Seconds(start_time))
         client_app.Stop(ns.Seconds(self.config.collab_start +
                                    self.config.collab_duration))
         self.collab_clients.Add(client_app)
-        print(f"  {source_name} ←→ {target_name}")
+        print(f"  {source_name} (TCP) → {target_name}")
 
 
 class VisualizationManager:
