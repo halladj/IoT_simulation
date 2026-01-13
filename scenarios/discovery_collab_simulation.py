@@ -12,6 +12,8 @@ Visualization: Uses NetSimulyzer (3D) if available, falls back to NetAnim (2D)
 """
 
 import sys
+import csv
+from datetime import datetime
 
 # Fixed import statement
 try:
@@ -208,17 +210,29 @@ class MobilityConfigurator:
         # Create position allocator - constrained to avoid propagation delay overflow
         mobile_position = ns.RandomRectanglePositionAllocator()
 
-        # Create random variables for X and Y coordinates (smaller area to avoid overflow)
-        x_var = ns.CreateObject[ns.UniformRandomVariable]()
-        x_var.SetAttribute("Min", ns.DoubleValue(0.0))
-        x_var.SetAttribute("Max", ns.DoubleValue(60.0))
-
-        y_var = ns.CreateObject[ns.UniformRandomVariable]()
-        y_var.SetAttribute("Min", ns.DoubleValue(0.0))
-        y_var.SetAttribute("Max", ns.DoubleValue(30.0))
-
-        mobile_position.SetX(x_var)
-        mobile_position.SetY(y_var)
+        # Mobile nodes: Use ListPositionAllocator with explicit positions to avoid overlap
+        mobile_position = ns.ListPositionAllocator()
+        
+        # Set distinct starting positions for each mobile node (avoiding fixed node positions)
+        # Fixed nodes are at (0,0) and (50,0), so place mobiles away from these
+        mobile_positions = [
+            (15.0, 20.0, 0.0),   # Mobile-0
+            (35.0, 25.0, 0.0),   # Mobile-1
+            (55.0, 15.0, 0.0),   # Mobile-2
+            (25.0, 35.0, 0.0),   # Mobile-3
+        ]
+        
+        for i in range(min(len(mobile_positions), self.node_manager.get_mobile_nodes().GetN())):
+            x, y, z = mobile_positions[i]
+            mobile_position.Add(ns.Vector(x, y, z))
+        
+        # If more mobile nodes than predefined positions, add with offset
+        num_mobile = self.node_manager.get_mobile_nodes().GetN()
+        for i in range(len(mobile_positions), num_mobile):
+            x = 20.0 + (i * 10.0)
+            y = 20.0 + ((i % 3) * 8.0)
+            mobile_position.Add(ns.Vector(x, y, 0.0))
+        
         mobile_mobility.SetPositionAllocator(mobile_position)
 
         mobile_mobility.SetMobilityModel("ns3::RandomWalk2dMobilityModel",
@@ -585,6 +599,151 @@ class VisualizationManager:
         print("  - Or edit the XML to add <rectangle> elements\\n")
 
 
+class FeatureExtractor:
+    """Extracts network features using FlowMonitor"""
+
+    def __init__(self, config: SimulationConfig):
+        self.config = config
+        self.flow_monitor = None
+        self.monitor_helper = None
+        self.node_densities = {} # node_id -> list of neighbor counts
+
+    def setup_flow_monitor(self, fixed_interfaces, mobile_interfaces):
+        """Install FlowMonitor on all nodes"""
+        self.monitor_helper = ns.FlowMonitorHelper()
+        self.flow_monitor = self.monitor_helper.InstallAll()
+        print("FlowMonitor feature extraction configured")
+
+    def schedule_density_sampling(self, node_manager):
+        """Schedule periodic sampling of node density"""
+        # Store node_manager reference for later sampling
+        self.node_manager = node_manager
+        
+        # Initialize storage - we'll compute density at the end instead of during simulation
+        for i in range(node_manager.get_all_nodes().GetN()):
+            node = node_manager.get_all_nodes().Get(i)
+            self.node_densities[node.GetId()] = []
+        
+        print("Density will be computed post-simulation from node positions")
+
+    def _compute_average_density_per_node(self):
+        """Compute average density for each node based on final positions"""
+        all_nodes = self.node_manager.get_all_nodes()
+        n = all_nodes.GetN()
+        
+        # Calculate density based on current positions
+        for i in range(n):
+            node_i = all_nodes.Get(i)
+            mob_i = node_i.GetObject[ns.MobilityModel]()
+            
+            neighbor_count = 0
+            for j in range(n):
+                if i == j: 
+                    continue
+                node_j = all_nodes.Get(j)
+                mob_j = node_j.GetObject[ns.MobilityModel]()
+                
+                dist = mob_i.GetDistanceFrom(mob_j)
+                # Using config.discovery_range as the density measurement radius
+                if dist <= self.config.discovery_range:
+                    neighbor_count += 1
+            
+            # Store single snapshot of density
+            self.node_densities[node_i.GetId()].append(neighbor_count)
+
+    def extract_features(self):
+        """Extract flow statistics and save to CSV"""
+        print("Extracting features (this may take a moment)...")
+        
+        # Compute density snapshot at end of simulation
+        self._compute_average_density_per_node()
+        
+        self.flow_monitor.CheckForLostPackets()
+        classifier = self.monitor_helper.GetClassifier()
+
+        with open('simulation_features.csv', 'w', newline='') as csvfile:
+            fieldnames = ['FlowID', 'SourceIP', 'DestIP', 'Protocol', 'Duration',
+                         'TxPackets', 'RxPackets', 'TxBytes', 'RxBytes',
+                         'MeanDelay', 'MeanJitter', 'LostPackets', 'Throughput_Kbps',
+                         'AvgNodeSpeed_mps', 'DistToAP_meters', 'AvgNodeDensity']
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+
+            for flow_id, flow_stats in self.flow_monitor.GetFlowStats():
+                t = classifier.FindFlow(flow_id)
+                proto = {6: 'TCP', 17: 'UDP'}.get(t.protocol, str(t.protocol))
+                
+                source_addr = t.sourceAddress
+                dest_addr = t.destinationAddress
+
+                # Avoid exporting flows with no packets
+                if flow_stats.txPackets == 0:
+                    continue
+
+                duration = flow_stats.timeLastRxPacket.GetSeconds() - flow_stats.timeFirstTxPacket.GetSeconds()
+                if duration <= 0:
+                    duration = 1.0 
+
+                throughput = (flow_stats.rxBytes * 8.0) / duration / 1000.0 if duration > 0 else 0
+
+                # Calculate Average Density for the source node
+                # Note: We need to map IP to Node ID to find the correct density stats
+                # This is tricky with just FlowClassifier.
+                # Heuristic: We won't map perfectly in this simplified block without an IP-NodeID map.
+                # However, we can map sequentially if we know the IP assignment logic.
+                # Fixed: 10.1.1.1, .2
+                # Mobile: 10.1.1.3, .4, .5, .6
+                
+                # Simple parsing of last octet to estimate node ID (0-based)
+                # Network Base is 10.1.1.0. IPs start at 1.
+                # Node 0 (Fixed-0) -> 10.1.1.1
+                # Node 1 (Fixed-1) -> 10.1.1.2
+                # Node 2 (Mobile-0) -> 10.1.1.3
+                
+                avg_density = "N/A"
+                try:
+                    # Convert source address string "10.1.1.X" to int X
+                    # This relies on standard string representation
+                    ip_str = str(source_addr)
+                    if ip_str.startswith("10.1.1."):
+                        octet = int(ip_str.split('.')[-1])
+                        # Assuming sequential assignment starting at 1 for Node 0
+                        node_id = octet - 1
+                        if node_id in self.node_densities:
+                            counts = self.node_densities[node_id]
+                            if counts:
+                                avg_density = f"{sum(counts) / len(counts):.2f}"
+                except Exception:
+                    pass
+
+                writer.writerow({
+                    'FlowID': flow_id,
+                    'SourceIP': source_addr,
+                    'DestIP': dest_addr,
+                    'Protocol': proto,
+                    'Duration': f"{duration:.4f}",
+                    'TxPackets': flow_stats.txPackets,
+                    'RxPackets': flow_stats.rxPackets,
+                    'TxBytes': flow_stats.txBytes,
+                    'RxBytes': flow_stats.rxBytes,
+                    'MeanDelay': f"{flow_stats.delaySum.GetSeconds() / flow_stats.rxPackets if flow_stats.rxPackets > 0 else 0:.6f}",
+                    'MeanJitter': f"{flow_stats.jitterSum.GetSeconds() / (flow_stats.rxPackets - 1) if flow_stats.rxPackets > 1 else 0:.6f}",
+                    'LostPackets': flow_stats.lostPackets,
+                    'Throughput_Kbps': f"{throughput:.2f}",
+                    'AvgNodeSpeed_mps': "N/A",
+                    'DistToAP_meters': "N/A",
+                    'AvgNodeDensity': avg_density
+                })
+        
+        print(f"Features saved to 'simulation_features.csv'")
+
+    def setup_mobility_tracing(self, node_manager):
+        """Setup mobility tracing"""
+        # This function would attach to CourseChange triggers to log X,Y,Z over time
+        # For now, we'll rely on the existing visualization traces or FlowMonitor
+        pass
+
+
 class Simulation:
     """Main simulation orchestrator"""
 
@@ -596,7 +755,9 @@ class Simulation:
         self.stack_config = None
         self.discovery_manager = None
         self.collab_manager = None
+        self.collab_manager = None
         self.viz_manager = None
+        self.feature_extractor = None
 
     def initialize(self, argv):
         """Initialize simulation components"""
@@ -612,6 +773,7 @@ class Simulation:
         self.discovery_manager = DiscoveryPhaseManager(self.config, self.node_manager)
         self.collab_manager = CollaborationPhaseManager(self.config, self.node_manager)
         self.viz_manager = VisualizationManager(self.config, self.node_manager)
+        self.feature_extractor = FeatureExtractor(self.config)
 
     def setup(self):
         """Setup all simulation components"""
@@ -648,6 +810,11 @@ class Simulation:
         # Setup visualization
         self.viz_manager.setup_visualization()
 
+        # Setup feature extraction
+        self.feature_extractor.setup_flow_monitor(fixed_intf, mobile_intf)
+        self.feature_extractor.setup_mobility_tracing(self.node_manager)
+        self.feature_extractor.schedule_density_sampling(self.node_manager)
+
     def run(self):
         """Run the simulation"""
         print(f"{'='*70}")
@@ -657,6 +824,8 @@ class Simulation:
         ns.Simulator.Stop(ns.Seconds(self.config.sim_time))
         ns.Simulator.Run()
 
+        # Extract and save features
+        self.feature_extractor.extract_features()
         print(f"\n{'='*70}")
         print("Simulation completed successfully!")
         print(f"{'='*70}\n")
