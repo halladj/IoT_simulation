@@ -1,0 +1,101 @@
+\documentclass[conference]{IEEEtran}
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\begin{document}
+
+\title{Security Analysis of IoT Discovery and Collaboration Protocols: A DDoS Attack Scenario}
+
+\author{\IEEEauthorblockN{Hamza Halladj}
+\IEEEauthorblockA{\textit{Department of Computer Science} \\
+\textit{[University Name]}\\
+[City, Country] \\
+email@email.com}
+}
+
+\maketitle
+
+\begin{abstract}
+This proposal outlines a methodology for evaluating the resilience of a distributed Mobile IoT discovery and collaboration protocol against Denial of Service (DoS) attacks. We propose a simulation-based approach using NS-3 to model an internal threat where a compromised mobile node initiates a high-rate UDP flood targeting a central collaboration access point. The study aims to quantify the impact on network throughput, packet loss, and channel saturation during critical collaboration phases.
+\end{abstract}
+
+\begin{IEEEkeywords}
+IoT, NS-3, DDoS, UDP Flood, Network Security, Wireless Simulation
+\end{IEEEkeywords}
+
+\section{Introduction}
+As Internet of Things (IoT) devices increasingly rely on ad-hoc discovery and peer-to-peer collaboration, their susceptibility to internal network attacks grows. The protocol under study involves a two-phase operation: a UDP-based Discovery Phase followed by a TCP-based Collaboration Phase. This paper proposes a scenario to test the robustness of the TCP collaboration phase against a Distributed Denial of Service (DDoS) attack launched by an insider threat.
+
+\section{Threat Model}
+We define the threat model based on the capabilities of a compromised internal node:
+\begin{itemize}
+    \item \textbf{Attacker Type}: Insider Threat / Compromised Mobile Node.
+    \item \textbf{Access Level}: The attacker possesses valid network credentials (WPA2 keys, IP address) and is fully authenticated within the simulation environment.
+    \item \textbf{Knowledge}: The attacker is aware of the protocol timeline, specifically targeting the \textit{Collaboration Phase} ($t=25s$ to $t=95s$) to maximize disruption.
+    \item \textbf{Attack Vector}: UDP Flood. The attacker utilizes the connectionless nature of UDP to generate a high volume of traffic without waiting for acknowledgments.
+\end{itemize}
+
+\section{Proposed Attack Methodology}
+
+\subsection{Simulation Setup}
+The attack will be implemented within the NS-3 simulation environment (version 3.45) using the existing topological setup of fixed Access Points (APs) and mobile IoT nodes.
+
+\subsection{Attacker Configuration}
+\begin{itemize}
+    \item \textbf{Source}: Node \texttt{Mobile-0} (Compromised Agent).
+    \item \textbf{Target}: Node \texttt{Fixed-0} (Cluster Head/AP).
+    \item \textbf{Timing}: The attack commences at $t=25.0s$, synchronized with the start of the Collaboration Phase.
+\end{itemize}
+
+\subsection{Traffic Profile}
+The malicious traffic is generated using an \texttt{OnOffApplication} with a \texttt{UdpSocketFactory}. The traffic parameters are chosen to saturate the 802.11n wireless channel:
+
+\begin{table}[htbp]
+\caption{Traffic Parameters Comparison}
+\begin{center}
+\begin{tabular}{|l|c|c|}
+\hline
+\textbf{Parameter} & \textbf{Legitimate (TCP)} & \textbf{Malicious (UDP)} \\
+\hline
+Protocol & TCP & UDP \\
+\hline
+Data Rate & $\approx$ 8 kbps & 50 Mbps \\
+\hline
+Packet Size & 1024 bytes & 1024 bytes \\
+\hline
+Duty Cycle & Intermittent & 100\% (Continuous) \\
+\hline
+\end{tabular}
+\label{tab1}
+\end{center}
+\end{table}
+
+\section{Expected Impact}
+We hypothesize the following impacts on the network performance:
+
+\subsection{Channel Saturation}
+The high-rate UDP stream is expected to dominate the shared wireless medium. Due to the CSMA/CA mechanism of 802.11, legitimate nodes attempting to send TCP SYN or ACK packets will persistently sense the medium as busy, leading to exponential backoff and eventual packet drops.
+
+\subsection{Throughput Degradation}
+The ``Goodput'' of legitimate collaboration links (e.g., \texttt{Mobile-1} $\to$ \texttt{Fixed-0}) is expected to degrade significantly, approaching zero as the attack intensity increases.
+
+\subsection{Resource Exhaustion}
+The receiving buffer of the target AP (\texttt{Fixed-0}) may overflow, causing tail-drop of incoming legitimate packets.
+
+\section{Verification & Metrics}
+The success of the attack will be verified using PCAP trace analysis:
+\begin{enumerate}
+    \item \textbf{Traffic Volume}: Visualization of I/O graphs showing UDP dominance.
+    \item \textbf{Retransmissions}: Analysis of \texttt{tcp.analysis.retransmission} fields for legitimate flows.
+    \item \textbf{Packet Loss Ratio}: Calculation of lost packets versus total transmitted packets for non-malicious nodes.
+\end{enumerate}
+
+\section{Conclusion}
+This proposal sets the stage for a rigorous evaluation of IoT protocol security. By simulating a realistic UDP flood attack, we aim to identify critical vulnerabilities in the current collaboration implementation and propose future mitigation strategies such as rate limiting or traffic anomaly detection.
+
+\end{document}
