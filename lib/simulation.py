@@ -24,6 +24,7 @@ from .protocols.discovery import DiscoveryPhaseManager
 from .protocols.collaboration import CollaborationPhaseManager
 from .visualization.manager import VisualizationManager
 from .features.extractor import FeatureExtractor
+from .attacks import DdosAttack
 
 
 class Simulation:
@@ -55,6 +56,7 @@ class Simulation:
         self.collab_manager = None
         self.viz_manager = None
         self.feature_extractor = None
+        self.attack_manager = None
 
     def initialize(self, argv: List[str]) -> None:
         """Initialize simulation components with configuration.
@@ -82,7 +84,10 @@ class Simulation:
             self.discovery_manager = DiscoveryPhaseManager(self.config, self.node_manager)
             self.collab_manager = CollaborationPhaseManager(self.config, self.node_manager)
             self.viz_manager = VisualizationManager(self.config, self.node_manager)
-            self.feature_extractor = FeatureExtractor(self.config)
+            self.feature_extractor = FeatureExtractor(self.config, self.node_manager)
+            
+            if self.config.attack_type == "ddos":
+                self.attack_manager = DdosAttack(self.config, self.node_manager)
             
         except Exception as e:
             raise SimulationError(f"Initialization failed: {e}")
@@ -122,6 +127,10 @@ class Simulation:
             self.discovery_manager.setup_discovery_phase(fixed_interfaces, mobile_interfaces)
             self.collab_manager.setup_collaboration_phase(fixed_interfaces, mobile_interfaces)
 
+            # Setup attacks
+            if self.attack_manager:
+                self.attack_manager.setup_attack(fixed_interfaces, mobile_interfaces)
+
             # Setup visualization
             self.viz_manager.setup_visualization()
 
@@ -133,9 +142,9 @@ class Simulation:
             raise SimulationError(f"Setup failed: {e}")
 
     def run(self) -> None:
-        """Run the simulation.
+        """Run the simulation step-by-step.
         
-        Executes the NS-3 simulation and extracts features.
+        Executes the NS-3 simulation in 1.0 second increments to extract dynamic time-series features.
         
         Raises:
             SimulationError: If simulation execution fails
@@ -145,11 +154,20 @@ class Simulation:
             print("Starting simulation...")
             print("="*70 + "\n")
 
-            # Run simulation
-            ns.Simulator.Stop(ns.Seconds(self.config.sim_time))
-            ns.Simulator.Run()
+            # Run simulation in increments to safely allow python feature extraction
+            now = 0.0
+            step = 1.0
+            while now < self.config.sim_time:
+                # Tell simulator to stop at the next step interval
+                ns.Simulator.Stop(ns.Seconds(now + step))
+                ns.Simulator.Run()
+                
+                # We are now paused exactly at 'now + step' Simulation Time
+                self.feature_extractor.sample_time_series()
+                
+                now += step
 
-            # Extract features after simulation completes
+            # Final feature extraction and CSV export
             self.feature_extractor.extract_features()
 
             # Cleanup

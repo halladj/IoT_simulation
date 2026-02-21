@@ -6,8 +6,8 @@ Extracts network flow and mobility features from simulation for ML/IDS research.
 
 import csv
 import os
+import math
 from typing import TYPE_CHECKING, Dict, List
-from collections import defaultdict
 
 if TYPE_CHECKING:
     from ..core.config import SimulationConfig
@@ -18,123 +18,147 @@ try:
 except ModuleNotFoundError:
     raise SystemExit("NS-3 Python bindings not found")
 
-from ..core.constants import CSV_OUTPUT_FILENAME, OUTPUT_DIR
+from ..core.constants import OUTPUT_DIR
 from ..core.exceptions import FeatureExtractionError
-
 
 class FeatureExtractor:
     """Extracts and exports network flow and mobility features.
     
-    Uses NS-3 FlowMonitor to collect network statistics and calculates
-    mobility-specific metrics like node density.
-    
-    Attributes:
-        config (SimulationConfig): Simulation configuration
-        flow_monitor: NS-3 FlowMonitor instance
-        monitor_helper: NS-3 FlowMonitorHelper
-        node_manager: Node manager reference
-        node_densities: Dict mapping node_id to list of neighbor counts
+    Implements a dual-extraction method building:
+    1. Time-series window features (N-BaIoT style + Mobility Context)
+    2. Flow-based features (IoTID20 style)
     """
 
-    def __init__(self, config: "SimulationConfig") -> None:
-        """Initialize feature extractor.
-        
-        Args:
-            config: Simulation configuration
-        """
+    def __init__(self, config: "SimulationConfig", node_manager: "NodeManager") -> None:
+        """Initialize feature extractor."""
         self.config = config
+        self.node_manager = node_manager
         self.flow_monitor = None
         self.monitor_helper = None
-        self.node_manager = None
-        self.node_densities: Dict[int, List[int]] = defaultdict(list)
+        
+        # Time-series storage
+        self.time_series_data = [] 
+        self.last_rx_bytes = 0
+        self.last_tx_bytes = 0
+        self.last_rx_packets = 0
+        self.last_tx_packets = 0
 
     def setup_flow_monitor(
         self,
         fixed_interfaces: "ns.Ipv4InterfaceContainer",
         mobile_interfaces: "ns.Ipv4InterfaceContainer"
     ) -> None:
-        """Install FlowMonitor on all nodes to track network flows.
-        
-        Args:
-            fixed_interfaces: IPv4 interfaces for fixed nodes
-            mobile_interfaces: IPv4 interfaces for mobile nodes
-        """
+        """Install FlowMonitor on all nodes."""
         self.monitor_helper = ns.FlowMonitorHelper()
         self.flow_monitor = self.monitor_helper.InstallAll()
         print("FlowMonitor feature extraction configured")
 
     def schedule_density_sampling(self, node_manager: "NodeManager") -> None:
-        """Prepare density calculation (computed post-simulation).
-        
-        Args:
-            node_manager: Node manager to access node positions
-        """
-        self.node_manager = node_manager
-        
-        # Initialize storage for density values
-        for i in range(node_manager.get_all_nodes().GetN()):
-            node = node_manager.get_all_nodes().Get(i)
-            self.node_densities[node.GetId()] = []
-        
-        print("Density will be computed post-simulation from node positions")
+        """Schedule the periodic task to sample N-BaIoT and Context features."""
+        # Managed continuously by the Simulation orchestrator step-by-step
+        pass
 
-    def _compute_average_density_per_node(self) -> None:
-        """Compute average node density based on final positions.
-        
-        Calculates number of neighbors within discovery range for each node
-        at the end of simulation.
-        """
-        if not self.node_manager:
+    def sample_time_series(self) -> None:
+        """Sample context and network metrics for the current time window."""
+        now = ns.Simulator.Now().GetSeconds()
+        if now > self.config.sim_time:
             return
-            
-        all_nodes = self.node_manager.get_all_nodes()
-        n = all_nodes.GetN()
+
+        # 1. Calculate Novel Mobility Context Features
+        victim_node = self.node_manager.get_mobile_nodes().Get(0)
+        victim_mob = victim_node.GetObject[ns.MobilityModel]()
+        v_pos = victim_mob.GetPosition()
         
-        # Calculate density based on final positions
-        for i in range(n):
-            node_i = all_nodes.Get(i)
-            mob_i = node_i.GetObject[ns.MobilityModel]()
+        total_neighbors = 0
+        malicious_neighbors = 0
+        min_attacker_dist = float('inf')
+        
+        fixed_nodes = self.node_manager.get_fixed_nodes()
+        for i in range(fixed_nodes.GetN()):
+            f_node = fixed_nodes.Get(i)
+            f_mob = f_node.GetObject[ns.MobilityModel]()
+            f_pos = f_mob.GetPosition()
             
-            neighbor_count = 0
-            for j in range(n):
-                if i == j: 
-                    continue
-                node_j = all_nodes.Get(j)
-                mob_j = node_j.GetObject[ns.MobilityModel]()
-                
-                dist = mob_i.GetDistanceFrom(mob_j)
-                # Using config.discovery_range as the density measurement radius
-                if dist <= self.config.discovery_range:
-                    neighbor_count += 1
+            dist = math.sqrt((v_pos.x - f_pos.x)**2 + (v_pos.y - f_pos.y)**2)
+            if dist <= self.config.discovery_range:
+                total_neighbors += 1
+                if self.node_manager.is_malicious(f_node.GetId()):
+                    malicious_neighbors += 1
+                    if dist < min_attacker_dist:
+                        min_attacker_dist = dist
+
+        dist_to_attacker = min_attacker_dist if min_attacker_dist != float('inf') else -1.0
+        # If there are malicious nodes within context, we are getting strictly attacked!
+        is_under_attack = 1 if malicious_neighbors > 0 else 0
+        
+        # 2. Calculate N-BaIoT Time-Window Aggregated Features
+        self.flow_monitor.CheckForLostPackets()
+        stats = self.flow_monitor.GetFlowStats()
+        
+        current_rx_bytes = 0
+        current_tx_bytes = 0
+        current_rx_packets = 0
+        current_tx_packets = 0
+        
+        for flow_id, flow_stat in stats:
+            current_rx_bytes += flow_stat.rxBytes
+            current_tx_bytes += flow_stat.txBytes
+            current_rx_packets += flow_stat.rxPackets
+            current_tx_packets += flow_stat.txPackets
             
-            # Store single snapshot of density
-            self.node_densities[node_i.GetId()].append(neighbor_count)
+        # Diff against last 1.0s window
+        window_rx_bytes = current_rx_bytes - self.last_rx_bytes
+        window_tx_bytes = current_tx_bytes - self.last_tx_bytes
+        window_rx_packets = current_rx_packets - self.last_rx_packets
+        window_tx_packets = current_tx_packets - self.last_tx_packets
+        
+        # Save state for next tick
+        self.last_rx_bytes = current_rx_bytes
+        self.last_tx_bytes = current_tx_bytes
+        self.last_rx_packets = current_rx_packets
+        self.last_tx_packets = current_tx_packets
+        
+        record = {
+            'SimulationTime': float(f"{now:.1f}"),
+            'Mobile_X_Pos': float(f"{v_pos.x:.2f}"),
+            'Mobile_Y_Pos': float(f"{v_pos.y:.2f}"),
+            'Node_Density': total_neighbors,
+            'Malicious_Neighbors': malicious_neighbors,
+            'Dist_To_Attacker': float(f"{dist_to_attacker:.2f}"),
+            'Node_Sending_Rate_Pkts': window_tx_packets,
+            'Node_Sending_Rate_Bytes': window_tx_bytes,
+            'Rx_Bytes_Per_Sec': window_rx_bytes,
+            'Rx_Pkts_Per_Sec': window_rx_packets,
+            'Is_Under_Attack': is_under_attack
+        }
+        self.time_series_data.append(record)
 
     def extract_features(self) -> None:
-        """Extract flow statistics and save to CSV.
-        
-        Collects network flow metrics from FlowMonitor and mobility
-        metrics, then exports to CSV file.
-        
-        Raises:
-            FeatureExtractionError: If feature extraction fails
-        """
+        """Extract both Flow and Time-Series statistics to CSVs."""
         try:
-            print("Extracting features (this may take a moment)...")
+            print("Exporting ML datasets (this may take a moment)...")
+            os.makedirs(OUTPUT_DIR, exist_ok=True)
             
-            # Compute density snapshot at end of simulation
-            self._compute_average_density_per_node()
-            
+            # --- Export Time Series Features ---
+            ts_path = os.path.join(OUTPUT_DIR, "timeseries_features.csv")
+            if self.time_series_data:
+                with open(ts_path, 'w', newline='') as csvfile:
+                    fieldnames = self.time_series_data[0].keys()
+                    writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(self.time_series_data)
+                print(f"Time-series features saved to '{ts_path}'")
+                
+            # --- Export IoTID20 Style Flow Features ---
             self.flow_monitor.CheckForLostPackets()
             classifier = self.monitor_helper.GetClassifier()
 
-            csv_path = os.path.join(OUTPUT_DIR, CSV_OUTPUT_FILENAME)
-            with open(csv_path, 'w', newline='') as csvfile:
+            flow_path = os.path.join(OUTPUT_DIR, "flow_features.csv")
+            with open(flow_path, 'w', newline='') as csvfile:
                 fieldnames = [
-                    'FlowID', 'SourceIP', 'DestIP', 'Protocol', 'Duration',
-                    'TxPackets', 'RxPackets', 'TxBytes', 'RxBytes',
-                    'MeanDelay', 'MeanJitter', 'LostPackets', 'Throughput_Kbps',
-                    'AvgNodeSpeed_mps', 'DistToAP_meters', 'AvgNodeDensity'
+                    'Flow_ID', 'Src_IP', 'Dst_IP', 'Protocol', 'Flow_Duration',
+                    'Tot_Fwd_Pkts', 'Tot_Bwd_Pkts', 'TotLen_Fwd_Bytes', 'TotLen_Bwd_Bytes',
+                    'Flow_Bytes_s', 'Flow_Pkts_s', 'Mean_Delay', 'Mean_Jitter', 'Lost_Packets'
                 ]
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                 writer.writeheader()
@@ -143,67 +167,34 @@ class FeatureExtractor:
                     t = classifier.FindFlow(flow_id)
                     proto = {6: 'TCP', 17: 'UDP'}.get(t.protocol, str(t.protocol))
                     
-                    source_addr = t.sourceAddress
-                    dest_addr = t.destinationAddress
-
-                    # Skip flows with no packets
                     if flow_stats.txPackets == 0:
                         continue
 
                     duration = flow_stats.timeLastRxPacket.GetSeconds() - flow_stats.timeFirstTxPacket.GetSeconds()
                     if duration <= 0:
-                        duration = 1.0 
+                        duration = 0.0001 
 
-                    throughput = (flow_stats.rxBytes * 8.0) / duration / 1000.0 if duration > 0 else 0
-
-                    # Calculate average density for source node
-                    avg_density = self._get_node_density(source_addr)
+                    throughput_bytes = (flow_stats.rxBytes) / duration
+                    packet_rate = (flow_stats.rxPackets) / duration
 
                     writer.writerow({
-                        'FlowID': flow_id,
-                        'SourceIP': source_addr,
-                        'DestIP': dest_addr,
+                        'Flow_ID': flow_id,
+                        'Src_IP': t.sourceAddress,
+                        'Dst_IP': t.destinationAddress,
                         'Protocol': proto,
-                        'Duration': f"{duration:.4f}",
-                        'TxPackets': flow_stats.txPackets,
-                        'RxPackets': flow_stats.rxPackets,
-                        'TxBytes': flow_stats.txBytes,
-                        'RxBytes': flow_stats.rxBytes,
-                        'MeanDelay': f"{flow_stats.delaySum.GetSeconds() / flow_stats.rxPackets if flow_stats.rxPackets > 0 else 0:.6f}",
-                        'MeanJitter': f"{flow_stats.jitterSum.GetSeconds() / (flow_stats.rxPackets - 1) if flow_stats.rxPackets > 1 else 0:.6f}",
-                        'LostPackets': flow_stats.lostPackets,
-                        'Throughput_Kbps': f"{throughput:.2f}",
-                        'AvgNodeSpeed_mps': "N/A",  # Placeholder for future implementation
-                        'DistToAP_meters': "N/A",    # Placeholder for future implementation
-                        'AvgNodeDensity': avg_density
+                        'Flow_Duration': f"{duration:.4f}",
+                        'Tot_Fwd_Pkts': flow_stats.txPackets,
+                        'Tot_Bwd_Pkts': flow_stats.rxPackets,
+                        'TotLen_Fwd_Bytes': flow_stats.txBytes,
+                        'TotLen_Bwd_Bytes': flow_stats.rxBytes,
+                        'Flow_Bytes_s': f"{throughput_bytes:.2f}",
+                        'Flow_Pkts_s': f"{packet_rate:.2f}",
+                        'Mean_Delay': f"{flow_stats.delaySum.GetSeconds() / flow_stats.rxPackets if flow_stats.rxPackets > 0 else 0:.6f}",
+                        'Mean_Jitter': f"{flow_stats.jitterSum.GetSeconds() / (flow_stats.rxPackets - 1) if flow_stats.rxPackets > 1 else 0:.6f}",
+                        'Lost_Packets': flow_stats.lostPackets
                     })
             
-            print(f"Features saved to '{csv_path}'")
+            print(f"Flow-based features saved to '{flow_path}'")
             
         except Exception as e:
             raise FeatureExtractionError(f"Feature extraction failed: {e}")
-
-    def _get_node_density(self, source_addr: "ns.Ipv4Address") -> str:
-        """Get average density for a node based on its IP address.
-        
-        Args:
-            source_addr: Source IPv4 address
-            
-        Returns:
-            Average density as string or "N/A" if unavailable
-        """
-        try:
-            # Map IP address to node ID
-            # Assuming sequential assignment: 10.1.1.1 = Node 0, 10.1.1.2 = Node 1, etc.
-            ip_str = str(source_addr)
-            if ip_str.startswith("10.1.1."):
-                octet = int(ip_str.split('.')[-1])
-                node_id = octet - 1  # Convert to 0-based index
-                if node_id in self.node_densities:
-                    counts = self.node_densities[node_id]
-                    if counts:
-                        return f"{sum(counts) / len(counts):.2f}"
-        except Exception:
-            pass
-        
-        return "N/A"

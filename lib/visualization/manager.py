@@ -102,16 +102,17 @@ class VisualizationManager:
                 self.anim.UpdateNodeColor(node, 255, 0, 0)
                 self.anim.UpdateNodeSize(node_id, 5.0, 5.0)
 
-            # Configure mobile nodes (blue)
+            # Configure mobile nodes (blue) and draw their discovery context range
             for i in range(self.config.num_mobile_nodes):
                 node = self.node_manager.get_mobile_nodes().Get(i)
                 node_id = node.GetId()
-                self.anim.UpdateNodeDescription(node, f"Mobile-{i}")
+                self.anim.UpdateNodeDescription(node, f"Mobile-{i} (Context: {self.config.discovery_range}m)")
                 self.anim.UpdateNodeColor(node, 0, 0, 255)
                 self.anim.UpdateNodeSize(node_id, 3.0, 3.0)
 
-            # Enable packet metadata for better visualization
-            self.anim.SetMaxPktsPerTraceFile(500000)
+
+            # Enable packet metadata for better visualization (very high threshold for large topologies)
+            self.anim.SetMaxPktsPerTraceFile(50000000)
             # Disable packet metadata for smoother playback (can cause hangs with large sims)
             # self.anim.EnablePacketMetadata(True)
 

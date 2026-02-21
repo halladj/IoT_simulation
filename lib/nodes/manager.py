@@ -44,6 +44,18 @@ class NodeManager:
         self.fixed_nodes = ns.NodeContainer()
         self.mobile_nodes = ns.NodeContainer()
         self.all_nodes = ns.NodeContainer()
+        self.malicious_node_ids = set()
+
+    def is_malicious(self, node_id: int) -> bool:
+        """Check if a node is designated as malicious.
+        
+        Args:
+            node_id: NS-3 global node ID
+            
+        Returns:
+            True if malicious, False otherwise
+        """
+        return node_id in self.malicious_node_ids
 
     def create_nodes(self) -> None:
         """Create fixed and mobile nodes according to configuration.
@@ -61,7 +73,14 @@ class NodeManager:
             self.all_nodes.Add(self.fixed_nodes)
             self.all_nodes.Add(self.mobile_nodes)
 
-            print(f"Created {self.config.num_fixed_nodes} fixed nodes")
+            # Assign malicious roles
+            import random
+            num_malicious = int(self.config.num_fixed_nodes * self.config.malicious_percentage)
+            malicious_indices = random.sample(range(self.config.num_fixed_nodes), num_malicious)
+            for i in malicious_indices:
+                self.malicious_node_ids.add(self.fixed_nodes.Get(i).GetId())
+
+            print(f"Created {self.config.num_fixed_nodes} fixed nodes ({num_malicious} malicious)")
             print(f"Created {self.config.num_mobile_nodes} mobile nodes\n")
             
         except Exception as e:

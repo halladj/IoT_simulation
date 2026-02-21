@@ -57,10 +57,14 @@ class SimulationConfig:
         self.num_mobile_nodes: int = 4
         self.sim_time: float = 100.0
         self.distance: float = FIXED_NODE_SPACING_METERS
+        # New DDoS scenario settings
+        self.malicious_percentage: float = 0.2
+        self.arena_width: float = 1000.0
+        self.attack_type: str = "none"
         
         # Output options
         self.enable_pcap: bool = False
-        self.verbose: bool = True
+        self.verbose: bool = False
 
         # Phase timings (use constants)
         self.discovery_start: float = DISCOVERY_START_TIME
@@ -101,6 +105,12 @@ class SimulationConfig:
                           help='Simulation time in seconds')
         parser.add_argument('--distance', type=float, default=self.distance,
                           help='Distance between fixed nodes')
+        parser.add_argument('--maliciousPercentage', type=float, default=self.malicious_percentage,
+                          help='Percentage of fixed nodes that act maliciously (0.0 to 1.0)')
+        parser.add_argument('--arenaWidth', type=float, default=self.arena_width,
+                          help='Total X-axis length for the density gradient')
+        parser.add_argument('--attackType', type=str, default="none", choices=["none", "ddos"],
+                          help='Attack module to activate')
         parser.add_argument('--pcap', action='store_true', default=self.enable_pcap,
                           help='Enable PCAP tracing')
         parser.add_argument('--verbose', action='store_true', default=self.verbose,
@@ -139,11 +149,18 @@ class SimulationConfig:
             raise ConfigurationError("Distance must be positive")
         if args.discoveryRange <= 0:
             raise ConfigurationError("Discovery range must be positive")
+        if not (0.0 <= args.maliciousPercentage <= 1.0):
+            raise ConfigurationError("Malicious percentage must be between 0.0 and 1.0")
+        if args.arenaWidth <= 0:
+            raise ConfigurationError("Arena width must be positive")
             
         self.num_fixed_nodes = args.numFixed
         self.num_mobile_nodes = args.numMobile
         self.sim_time = args.simTime
         self.distance = args.distance
+        self.malicious_percentage = args.maliciousPercentage
+        self.arena_width = args.arenaWidth
+        self.attack_type = args.attackType
         self.enable_pcap = args.pcap
         self.verbose = args.verbose
         self.discovery_duration = args.discoveryDuration

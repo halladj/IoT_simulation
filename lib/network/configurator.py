@@ -62,14 +62,20 @@ class NetworkConfigurator:
 
             wifi_phy = ns.YansWifiPhyHelper()
             wifi_channel = ns.YansWifiChannelHelper.Default()
+            
+            # Enforce a strict physical signal cutoff matching our context discovery range
+            wifi_channel.AddPropagationLoss("ns3::RangePropagationLossModel", 
+                                            "MaxRange", ns.DoubleValue(self.config.discovery_range))
+                                            
             wifi_phy.SetChannel(wifi_channel.Create())
             
-            # Configure transmission range to match discovery range
-            # TxPowerStart/End in dBm - higher values = longer range
-            # Approximate: 20 dBm ≈ 100m, 16 dBm ≈ 80m, 10 dBm ≈ 50m
-            tx_power = self._calculate_tx_power(self.config.discovery_range)
-            wifi_phy.Set("TxPowerStart", ns.DoubleValue(tx_power))
-            wifi_phy.Set("TxPowerEnd", ns.DoubleValue(tx_power))
+            # TxPower approximations
+            tx_power = getattr(self, '_calculate_tx_power', lambda x: 16.0)(self.config.discovery_range)
+            try:
+                wifi_phy.Set("TxPowerStart", ns.DoubleValue(tx_power))
+                wifi_phy.Set("TxPowerEnd", ns.DoubleValue(tx_power))
+            except Exception:
+                pass # Newer versions of NS-3 deprecate TxPowerStart in favor of other attributes
 
             wifi_mac = ns.WifiMacHelper()
             ssid = ns.Ssid(NETWORK_SSID)
